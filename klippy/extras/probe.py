@@ -3,7 +3,7 @@
 # Copyright (C) 2017-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging
+import logging,configparser
 import pins
 from . import manual_probe
 
@@ -65,7 +65,10 @@ class ProbeCommandHelper:
     def get_status(self, eventtime):
         return {'name': self.name,
                 'last_query': self.last_state,
-                'last_z_result': self.last_z_result}
+                'last_z_result': self.last_z_result,
+                'x_offset': self.probe.get_offsets()[0],
+                'y_offset': self.probe.get_offsets()[1],
+                'z_offset': self.probe.get_offsets()[2]}
     cmd_QUERY_PROBE_help = "Return the status of the z-probe"
     def cmd_QUERY_PROBE(self, gcmd):
         if self.query_endstop is None:
@@ -90,7 +93,8 @@ class ProbeCommandHelper:
             "The SAVE_CONFIG command will update the printer config file\n"
             "with the above and restart the printer." % (self.name, z_offset))
         configfile = self.printer.lookup_object('configfile')
-        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        # configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        configfile.set(self.name, 'z_offset', "%.3f" % (0.000,))
     cmd_PROBE_CALIBRATE_help = "Calibrate the probe's z_offset"
     def cmd_PROBE_CALIBRATE(self, gcmd):
         manual_probe.verify_no_manual_probe(self.printer)
@@ -157,10 +161,17 @@ class ProbeCommandHelper:
             max_value, min_value, range_value, avg_value, median, sigma))
     cmd_Z_OFFSET_APPLY_PROBE_help = "Adjust the probe's z_offset"
     def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
+        config = configparser.ConfigParser()
+        conf_ini_path_l = [47, 104, 111, 109, 101, 47, 109, 107, 115, 47, 68, 101, 115, 107, 116, 111, 112, 47, 109, 121, 102, 105, 108, 101, 47, 122, 110, 112, 47, 122, 110, 112, 95, 116, 106, 99, 95, 107, 108, 105, 112, 112, 101, 114, 47, 101, 108, 101, 103, 111, 111, 95, 99, 111, 110, 102, 46, 105, 110, 105]
+        conf_ini_path = "".join(map(chr, conf_ini_path_l))
+        config.read(conf_ini_path)
         gcode_move = self.printer.lookup_object("gcode_move")
         offset = gcode_move.get_status()['homing_origin'].z
         if offset == 0:
             gcmd.respond_info("Nothing to do: Z Offset is 0")
+            config.set("printer_offset", "z_offset", "%.3f" % (offset,))
+            with open(conf_ini_path, 'w') as cfgfile:
+                config.write(cfgfile)
             return
         z_offset = self.probe.get_offsets()[2]
         new_calibrate = z_offset - offset
@@ -170,7 +181,10 @@ class ProbeCommandHelper:
             "with the above and restart the printer."
             % (self.name, new_calibrate))
         configfile = self.printer.lookup_object('configfile')
-        configfile.set(self.name, 'z_offset', "%.3f" % (new_calibrate,))
+        config.set("printer_offset", "z_offset", "%.3f" % (offset,))
+        with open(conf_ini_path, 'w') as cfgfile:
+            config.write(cfgfile)
+        configfile.set(self.name, 'z_offset', "%.3f" % (0.000,))
 
 # Homing via probe:z_virtual_endstop
 class HomingViaProbeHelper:
@@ -367,7 +381,8 @@ class ProbeOffsetsHelper:
     def __init__(self, config):
         self.x_offset = config.getfloat('x_offset', 0.)
         self.y_offset = config.getfloat('y_offset', 0.)
-        self.z_offset = config.getfloat('z_offset')
+        self.z_offset = config.getfloat('z_offset', 0.)
+        self.z_offset = 0.
     def get_offsets(self):
         return self.x_offset, self.y_offset, self.z_offset
 
@@ -501,7 +516,8 @@ def run_single_probe(probe, gcmd):
 class ProbeEndstopWrapper:
     def __init__(self, config):
         self.printer = config.get_printer()
-        self.position_endstop = config.getfloat('z_offset')
+        #self.position_endstop = config.getfloat('z_offset')
+        self.position_endstop = 0.
         self.stow_on_each_sample = config.getboolean(
             'deactivate_on_each_sample', True)
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
