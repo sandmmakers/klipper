@@ -3,7 +3,7 @@
 # Copyright (C) 2017-2021  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging
+import logging,configparser
 import pins
 from . import manual_probe
 
@@ -22,7 +22,8 @@ class PrinterProbe:
         self.lift_speed = config.getfloat('lift_speed', self.speed, above=0.)
         self.x_offset = config.getfloat('x_offset', 0.)
         self.y_offset = config.getfloat('y_offset', 0.)
-        self.z_offset = config.getfloat('z_offset')
+        self.z_offset = config.getfloat('z_offset', 0.)
+        self.z_offset = 0.
         self.probe_calibrate_z = 0.
         self.multi_probe_pending = False
         self.last_state = False
@@ -127,6 +128,14 @@ class PrinterProbe:
             if "Timeout during endstop homing" in reason:
                 reason += HINT_TIMEOUT
             raise self.printer.command_error(reason)
+        # get z compensation from x_twist
+        # x_twist module checks if it is enabled, returns 0 compensation if not
+        x_twist_compensation = self.printer.lookup_object(
+            'x_twist_compensation', None)
+        z_compensation = 0 if not x_twist_compensation \
+            else x_twist_compensation.get_z_compensation_value(pos[0])
+        # add z compensation to probe position
+        epos[2] += z_compensation
         self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
                                 % (epos[0], epos[1], epos[2]))
         return epos[:3]
@@ -196,7 +205,10 @@ class PrinterProbe:
         gcmd.respond_info("probe: %s" % (["open", "TRIGGERED"][not not res],))
     def get_status(self, eventtime):
         return {'last_query': self.last_state,
-                'last_z_result': self.last_z_result}
+                'last_z_result': self.last_z_result,
+                'x_offset': self.x_offset,
+                'y_offset': self.y_offset,
+                'z_offset': self.z_offset}
     cmd_PROBE_ACCURACY_help = "Probe Z-height accuracy at current XY position"
     def cmd_PROBE_ACCURACY(self, gcmd):
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.)
@@ -248,7 +260,8 @@ class PrinterProbe:
             "The SAVE_CONFIG command will update the printer config file\n"
             "with the above and restart the printer." % (self.name, z_offset))
         configfile = self.printer.lookup_object('configfile')
-        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        # configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        configfile.set(self.name, 'z_offset', "%.3f" % (0.000,))
     cmd_PROBE_CALIBRATE_help = "Calibrate the probe's z_offset"
     def cmd_PROBE_CALIBRATE(self, gcmd):
         manual_probe.verify_no_manual_probe(self.printer)
@@ -267,10 +280,17 @@ class PrinterProbe:
         manual_probe.ManualProbeHelper(self.printer, gcmd,
                                        self.probe_calibrate_finalize)
     def cmd_Z_OFFSET_APPLY_PROBE(self,gcmd):
+        config = configparser.ConfigParser()
+        conf_ini_path_l = [47, 104, 111, 109, 101, 47, 109, 107, 115, 47, 68, 101, 115, 107, 116, 111, 112, 47, 109, 121, 102, 105, 108, 101, 47, 122, 110, 112, 47, 122, 110, 112, 95, 116, 106, 99, 95, 107, 108, 105, 112, 112, 101, 114, 47, 101, 108, 101, 103, 111, 111, 95, 99, 111, 110, 102, 46, 105, 110, 105]
+        conf_ini_path = "".join(map(chr, conf_ini_path_l))
+        config.read(conf_ini_path)
         offset = self.gcode_move.get_status()['homing_origin'].z
         configfile = self.printer.lookup_object('configfile')
         if offset == 0:
             self.gcode.respond_info("Nothing to do: Z Offset is 0")
+            config.set("printer_offset", "z_offset", "%.3f" % (offset,))
+            with open(conf_ini_path, 'w') as cfgfile:
+                config.write(cfgfile)
         else:
             new_calibrate = self.z_offset - offset
             self.gcode.respond_info(
@@ -278,14 +298,18 @@ class PrinterProbe:
                 "The SAVE_CONFIG command will update the printer config file\n"
                 "with the above and restart the printer."
                 % (self.name, new_calibrate))
-            configfile.set(self.name, 'z_offset', "%.3f" % (new_calibrate,))
+            config.set("printer_offset", "z_offset", "%.3f" % (offset,))
+            with open(conf_ini_path, 'w') as cfgfile:
+                config.write(cfgfile)
+            configfile.set(self.name, 'z_offset', "%.3f" % (0.000,))
     cmd_Z_OFFSET_APPLY_PROBE_help = "Adjust the probe's z_offset"
 
 # Endstop wrapper that enables probe specific features
 class ProbeEndstopWrapper:
     def __init__(self, config):
         self.printer = config.get_printer()
-        self.position_endstop = config.getfloat('z_offset')
+        #self.position_endstop = config.getfloat('z_offset')
+        self.position_endstop = 0.
         self.stow_on_each_sample = config.getboolean(
             'deactivate_on_each_sample', True)
         gcode_macro = self.printer.load_object(config, 'gcode_macro')

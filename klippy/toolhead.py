@@ -3,7 +3,7 @@
 # Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import math, logging, importlib
+import math, logging, importlib,configparser
 import mcu, chelper, kinematics.extruder
 
 # Common suffixes: _d is distance (in mm), _v is velocity (in
@@ -247,8 +247,8 @@ class ToolHead:
         self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
         self.step_generators = []
         # Create kinematics class
-        gcode = self.printer.lookup_object('gcode')
-        self.Coord = gcode.Coord
+        self.gcode = self.printer.lookup_object('gcode')
+        self.Coord = self.gcode.Coord
         self.extruder = kinematics.extruder.DummyExtruder(self.printer)
         kin_name = config.get('kinematics')
         try:
@@ -263,17 +263,40 @@ class ToolHead:
             logging.exception(msg)
             raise config.error(msg)
         # Register commands
-        gcode.register_command('G4', self.cmd_G4)
-        gcode.register_command('M400', self.cmd_M400)
-        gcode.register_command('SET_VELOCITY_LIMIT',
+        self.gcode.register_command('G4', self.cmd_G4)
+        self.gcode.register_command('M400', self.cmd_M400)
+        self.gcode.register_command('SET_VELOCITY_LIMIT',
                                self.cmd_SET_VELOCITY_LIMIT,
                                desc=self.cmd_SET_VELOCITY_LIMIT_help)
-        gcode.register_command('M204', self.cmd_M204)
+        self.gcode.register_command('M204', self.cmd_M204)
+        self.gcode.register_command('PRINT_MODE', self.cmd_PRINT_MODE,
+                               desc=self.cmd_PRINT_MODE_help)
+        self.gcode.register_command("FAN_MODE",self.cmd_FAN_MODE,
+                                desc=self.cmd_FAN_MODE_help)
         # Load some default modules
         modules = ["gcode_move", "homing", "idle_timeout", "statistics",
                    "manual_probe", "tuning_tower"]
         for module_name in modules:
             self.printer.load_object(config, module_name)
+        # Print Stat Tracking
+        self.print_stats = self.printer.load_object(config, 'print_stats')
+        # Print mode cfg
+        self.get_conf_max_velocity_success = False
+        self.get_conf_max_accel_success = False
+        self.get_conf_max_accel_to_decel_success = False
+        self.print_mode = 3
+        self.fan_mode = 0
+        self.max_velocity_normal = 500.0
+        self.max_accel_normal = 6000.0
+        self.max_accel_to_decel_normal = 4000.0
+        self.max_velocity_silent = 300.0
+        self.max_accel_silent = 5000.0
+        self.max_accel_to_decel_silent = 3000.0
+        self.max_velocity_berserk = 500.0
+        self.max_accel_berserk = 10000.0
+        self.max_accel_to_decel_berserk = 6000.0
+        self.conf_max_velocity = self.conf_max_accel = self.conf_max_accel_to_decel = 0.0
+        self.load_print_mode_conf()
     # Print time tracking
     def _update_move_time(self, next_print_time):
         batch_time = MOVE_BATCH_TIME
@@ -508,6 +531,8 @@ class ToolHead:
                      'max_velocity': self.max_velocity,
                      'max_accel': self.max_accel,
                      'max_accel_to_decel': self.requested_accel_to_decel,
+                     'print_mode':self.print_mode,
+                     'fan_mode':self.fan_mode,
                      'square_corner_velocity': self.square_corner_velocity})
         return res
     def _handle_shutdown(self):
@@ -552,6 +577,38 @@ class ToolHead:
         self.wait_moves()
     cmd_SET_VELOCITY_LIMIT_help = "Set printer velocity limits"
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
+        eventtime = self.reactor.monotonic()
+        #logging.info("\033[33m into cmd_SET_VELOCITY_LIMIT\033[0m")
+        # logging.info(eventtime)
+        # logging.info(self.print_stats.get_status(eventtime)['print_duration'])
+        if self.print_stats.get_status(eventtime)['print_duration'] > 0.0:
+            #logging.info("\033[33m into diy cmd_SET_VELOCITY_LIMIT\033[0m")
+            if self.print_mode == 0:
+                self.conf_max_velocity = self.max_velocity_normal
+                self.conf_max_accel = self.max_accel_normal
+                self.conf_max_accel_to_decel = self.max_accel_to_decel_normal
+                self.get_conf_max_velocity_success = True
+                self.get_conf_max_accel_success = True
+                self.get_conf_max_accel_to_decel_success = True
+            elif self.print_mode == 1:
+                self.conf_max_velocity = self.max_velocity_silent
+                self.conf_max_accel = self.max_accel_silent
+                self.conf_max_accel_to_decel = self.max_accel_to_decel_silent
+                self.get_conf_max_velocity_success = True
+                self.get_conf_max_accel_success = True
+                self.get_conf_max_accel_to_decel_success = True
+            elif self.print_mode == 2:
+                self.conf_max_velocity = self.max_velocity_berserk
+                self.conf_max_accel = self.max_accel_berserk
+                self.conf_max_accel_to_decel = self.max_accel_to_decel_berserk
+                self.get_conf_max_velocity_success = True
+                self.get_conf_max_accel_success = True
+                self.get_conf_max_accel_to_decel_success = True
+        else:
+            self.get_conf_max_velocity_success = False
+            self.get_conf_max_accel_success = False
+            self.get_conf_max_accel_to_decel_success = False
+        
         max_velocity = gcmd.get_float('VELOCITY', None, above=0.)
         max_accel = gcmd.get_float('ACCEL', None, above=0.)
         square_corner_velocity = gcmd.get_float(
@@ -559,12 +616,21 @@ class ToolHead:
         requested_accel_to_decel = gcmd.get_float(
             'ACCEL_TO_DECEL', None, above=0.)
         if max_velocity is not None:
+            if self.get_conf_max_velocity_success:
+                if max_velocity > self.conf_max_velocity:
+                    max_velocity = self.conf_max_velocity
             self.max_velocity = max_velocity
         if max_accel is not None:
+            if self.get_conf_max_accel_success:
+                if max_accel > self.conf_max_accel:
+                    max_accel = self.conf_max_accel
             self.max_accel = max_accel
         if square_corner_velocity is not None:
             self.square_corner_velocity = square_corner_velocity
         if requested_accel_to_decel is not None:
+            if self.get_conf_max_accel_to_decel_success:
+                if requested_accel_to_decel > self.conf_max_accel_to_decel:
+                    requested_accel_to_decel = self.conf_max_accel_to_decel
             self.requested_accel_to_decel = requested_accel_to_decel
         self._calc_junction_deviation()
         msg = ("max_velocity: %.6f\n"
@@ -574,13 +640,243 @@ class ToolHead:
                    self.max_velocity, self.max_accel,
                    self.requested_accel_to_decel,
                    self.square_corner_velocity))
-        self.printer.set_rollover_info("toolhead", "toolhead: %s" % (msg,))
+        #self.printer.set_rollover_info("toolhead", "toolhead: %s" % (msg,))
         if (max_velocity is None and
             max_accel is None and
             square_corner_velocity is None and
             requested_accel_to_decel is None):
             gcmd.respond_info(msg, log=False)
+    cmd_PRINT_MODE_help = "Set print mode"
+    def cmd_PRINT_MODE(self, gcmd):
+        set_print_mode = gcmd.get_int('SET', 0)
+        eventtime = self.reactor.monotonic()
+        logging.info("\033[33m into cmd_PRINT_MODE\033[0m")
+        logging.info(eventtime)
+        logging.info(self.print_stats.get_status(eventtime)['print_duration'])
+        get_conf_print_mode = False
+        get_conf_max_velocity_success = False
+        get_conf_max_accel_success = False
+        get_conf_max_accel_to_decel_success = False
+        get_conf_en_spreadCycle = False
+        print_mode = 3
+        max_velocity_normal = 500.0
+        max_accel_normal = 6000.0
+        max_accel_to_decel_normal = 4000.0
+        en_spreadCycle_normal = 0
+        max_velocity_silent = 300.0
+        max_accel_silent = 5000.0
+        max_accel_to_decel_silent = 3000.0
+        en_spreadCycle_silent = 0
+        max_velocity_berserk = 500.0
+        max_accel_berserk = 10000.0
+        max_accel_to_decel_berserk = 6000.0
+        en_spreadCycle_berserk = 1
+        conf_max_velocity = conf_max_accel = conf_max_accel_to_decel = 0.0
+        conf_en_spreadCycle = 0
+        config = configparser.ConfigParser()
+        conf_ini_path_l = [47, 104, 111, 109, 101, 47, 109, 107, 115, 47, 68, 101, 115, 107, 116, 111, 112, 47, 109, 121, 102, 105, 108, 101, 47, 122, 110, 112, 47, 122, 110, 112, 95, 116, 106, 99, 95, 107, 108, 105, 112, 112, 101, 114, 47, 101, 108, 101, 103, 111, 111, 95, 99, 111, 110, 102, 46, 105, 110, 105]
+        conf_ini_path = "".join(map(chr, conf_ini_path_l))
+        config.read(conf_ini_path)
+        if config.has_section("speed_mode"):
+                if config.has_option("speed_mode", "print_mode"):
+                    print_mode = config.getint("speed_mode", "print_mode")
+                    get_conf_print_mode = True
+                else:
+                    get_conf_print_mode = False
+        else:
+            get_conf_print_mode = False
+        if get_conf_print_mode:
+            if print_mode == set_print_mode:
+                self.gcode.respond_info("Nothing to do: Print mode is %d" % (print_mode))
+            else:
+                if set_print_mode == 0:
+                    config.set("speed_mode", "print_mode", "%d" % (set_print_mode,))
+                    with open(conf_ini_path, 'w') as cfgfile:
+                        config.write(cfgfile)
+                    logging.info("set print_mode to 0")
+                    self.gcode.respond_info("set print_mode to %d" % (set_print_mode))
+                    if config.has_option("speed_mode", "max_velocity_normal"):
+                        max_velocity_normal = config.getfloat("speed_mode", "max_velocity_normal")
+                        get_conf_max_velocity_success = True
+                    if config.has_option("speed_mode", "max_accel_normal_default"):
+                        max_accel_normal = config.getfloat("speed_mode", "max_accel_normal_default")
+                        get_conf_max_accel_success = True
+                    if config.has_option("speed_mode", "max_accel_to_decel_normal_default"):
+                        max_accel_to_decel_normal = config.getfloat("speed_mode", "max_accel_to_decel_normal_default")
+                        get_conf_max_accel_to_decel_success = True
+                    if config.has_option("speed_mode", "en_spreadcycle_normal"):
+                        en_spreadCycle_normal = config.getint("speed_mode", "en_spreadcycle_normal")
+                        get_conf_en_spreadCycle = True
+                    conf_max_velocity = max_velocity_normal
+                    conf_max_accel = max_accel_normal
+                    conf_max_accel_to_decel = max_accel_to_decel_normal
+                    conf_en_spreadCycle = en_spreadCycle_normal
+                elif set_print_mode == 1:
+                    config.set("speed_mode", "print_mode", "%d" % (set_print_mode,))
+                    with open(conf_ini_path, 'w') as cfgfile:
+                        config.write(cfgfile)
+                    logging.info("set print_mode to 1")
+                    self.gcode.respond_info("set print_mode to %d" % (set_print_mode))
+                    if config.has_option("speed_mode", "max_velocity_silent"):
+                        max_velocity_silent = config.getfloat("speed_mode", "max_velocity_silent")
+                        get_conf_max_velocity_success = True
+                    if config.has_option("speed_mode", "max_accel_silent_default"):
+                        max_accel_silent = config.getfloat("speed_mode", "max_accel_silent_default")
+                        get_conf_max_accel_success = True
+                    if config.has_option("speed_mode", "max_accel_to_decel_silent_default"):
+                        max_accel_to_decel_silent = config.getfloat("speed_mode", "max_accel_to_decel_silent_default")
+                        get_conf_max_accel_to_decel_success = True
+                    if config.has_option("speed_mode", "en_spreadcycle_silent"):
+                        en_spreadCycle_silent = config.getint("speed_mode", "en_spreadcycle_silent")
+                        get_conf_en_spreadCycle = True
+                    conf_max_velocity = max_velocity_silent
+                    conf_max_accel = max_accel_silent
+                    conf_max_accel_to_decel = max_accel_to_decel_silent
+                    conf_en_spreadCycle = en_spreadCycle_silent
+                elif set_print_mode == 2:
+                    config.set("speed_mode", "print_mode", "%d" % (set_print_mode,))
+                    with open(conf_ini_path, 'w') as cfgfile:
+                        config.write(cfgfile)
+                    logging.info("set print_mode to 2")
+                    self.gcode.respond_info("set print_mode to %d" % (set_print_mode))
+                    if config.has_option("speed_mode", "max_velocity_berserk"):
+                        max_velocity_berserk = config.getfloat("speed_mode", "max_velocity_berserk")
+                        get_conf_max_velocity_success = True
+                    if config.has_option("speed_mode", "max_accel_berserk_default"):
+                        max_accel_berserk = config.getfloat("speed_mode", "max_accel_berserk_default")
+                        get_conf_max_accel_success = True
+                    if config.has_option("speed_mode", "max_accel_to_decel_berserk_default"):
+                        max_accel_to_decel_berserk = config.getfloat("speed_mode", "max_accel_to_decel_berserk_default")
+                        get_conf_max_accel_to_decel_success = True
+                    if config.has_option("speed_mode", "en_spreadcycle_berserk"):
+                        en_spreadCycle_berserk = config.getint("speed_mode", "en_spreadcycle_berserk")
+                        get_conf_en_spreadCycle = True
+                    conf_max_velocity = max_velocity_berserk
+                    conf_max_accel = max_accel_berserk
+                    conf_max_accel_to_decel = max_accel_to_decel_berserk
+                    conf_en_spreadCycle = en_spreadCycle_berserk
+                elif set_print_mode == 10:
+                    self.print_mode = 0
+                elif set_print_mode == 11:
+                    self.print_mode = 1
+                elif set_print_mode == 12:
+                    self.print_mode = 2
+                else :
+                    self.gcode.respond_info("ERROR :Print mode should be 0~2, not %d" % (set_print_mode))
+        else:
+            if set_print_mode == 0:
+                config.set("speed_mode", "print_mode", "%d" % (set_print_mode,))
+                with open(conf_ini_path, 'w') as cfgfile:
+                    config.write(cfgfile)
+                logging.info("set print_mode to 0")
+                self.gcode.respond_info("set print_mode to %d" % (set_print_mode))
+                if config.has_option("speed_mode", "max_velocity_normal"):
+                    max_velocity_normal = config.getfloat("speed_mode", "max_velocity_normal")
+                    get_conf_max_velocity_success = True
+                if config.has_option("speed_mode", "max_accel_normal_default"):
+                    max_accel_normal = config.getfloat("speed_mode", "max_accel_normal_default")
+                    get_conf_max_accel_success = True
+                if config.has_option("speed_mode", "max_accel_to_decel_normal_default"):
+                    max_accel_to_decel_normal = config.getfloat("speed_mode", "max_accel_to_decel_normal_default")
+                    get_conf_max_accel_to_decel_success = True
+                if config.has_option("speed_mode", "en_spreadcycle_normal"):
+                    en_spreadCycle_normal = config.getint("speed_mode", "en_spreadcycle_normal")
+                    get_conf_en_spreadCycle = True
+                conf_max_velocity = max_velocity_normal
+                conf_max_accel = max_accel_normal
+                conf_max_accel_to_decel = max_accel_to_decel_normal
+                conf_en_spreadCycle = en_spreadCycle_normal
+            elif set_print_mode == 1:
+                config.set("speed_mode", "print_mode", "%d" % (set_print_mode,))
+                with open(conf_ini_path, 'w') as cfgfile:
+                    config.write(cfgfile)
+                logging.info("set print_mode to 1")
+                self.gcode.respond_info("set print_mode to %d" % (set_print_mode))
+                if config.has_option("speed_mode", "max_velocity_silent"):
+                    max_velocity_silent = config.getfloat("speed_mode", "max_velocity_silent")
+                    get_conf_max_velocity_success = True
+                if config.has_option("speed_mode", "max_accel_silent_default"):
+                    max_accel_silent = config.getfloat("speed_mode", "max_accel_silent_default")
+                    get_conf_max_accel_success = True
+                if config.has_option("speed_mode", "max_accel_to_decel_silent_default"):
+                    max_accel_to_decel_silent = config.getfloat("speed_mode", "max_accel_to_decel_silent_default")
+                    get_conf_max_accel_to_decel_success = True
+                if config.has_option("speed_mode", "en_spreadcycle_silent"):
+                    en_spreadCycle_silent = config.getint("speed_mode", "en_spreadcycle_silent")
+                    get_conf_en_spreadCycle = True
+                conf_max_velocity = max_velocity_silent
+                conf_max_accel = max_accel_silent
+                conf_max_accel_to_decel = max_accel_to_decel_silent
+                conf_en_spreadCycle = en_spreadCycle_silent
+            elif set_print_mode == 2:
+                config.set("speed_mode", "print_mode", "%d" % (set_print_mode,))
+                with open(conf_ini_path, 'w') as cfgfile:
+                    config.write(cfgfile)
+                logging.info("set print_mode to 2")
+                self.gcode.respond_info("set print_mode to %d" % (set_print_mode))
+                if config.has_option("speed_mode", "max_velocity_berserk"):
+                    max_velocity_berserk = config.getfloat("speed_mode", "max_velocity_berserk")
+                    get_conf_max_velocity_success = True
+                if config.has_option("speed_mode", "max_accel_berserk_default"):
+                    max_accel_berserk = config.getfloat("speed_mode", "max_accel_berserk_default")
+                    get_conf_max_accel_success = True
+                if config.has_option("speed_mode", "max_accel_to_decel_berserk_default"):
+                    max_accel_to_decel_berserk = config.getfloat("speed_mode", "max_accel_to_decel_berserk_default")
+                    get_conf_max_accel_to_decel_success = True
+                if config.has_option("speed_mode", "en_spreadcycle_berserk"):
+                    en_spreadCycle_berserk = config.getint("speed_mode", "en_spreadcycle_berserk")
+                    get_conf_en_spreadCycle = True
+                conf_max_velocity = max_velocity_berserk
+                conf_max_accel = max_accel_berserk
+                conf_max_accel_to_decel = max_accel_to_decel_berserk
+                conf_en_spreadCycle = en_spreadCycle_berserk
+            elif set_print_mode == 10:
+                self.print_mode = 0
+            elif set_print_mode == 11:
+                self.print_mode = 1
+            elif set_print_mode == 12:
+                self.print_mode = 2
+                
+            else :
+                self.gcode.respond_info("ERROR :Print mode should be 0~2, not %d" % (set_print_mode))
+        if set_print_mode == 10 or set_print_mode == 11 or set_print_mode ==12:
+            self.gcode.respond_info("set print_mode to %d.\n." % (self.print_mode))
+        else:
+            cmd_1 = "SET_VELOCITY_LIMIT"
+            if get_conf_max_velocity_success:
+                cmd_1 = cmd_1 + " VELOCITY=%.3f" % (conf_max_velocity)
+            if get_conf_max_accel_success:
+                cmd_1 = cmd_1 + " ACCEL=%.3f" % (conf_max_accel)
+            if get_conf_max_accel_to_decel_success:
+                cmd_1 = cmd_1 + " ACCEL_TO_DECEL=%.3f" % (conf_max_accel_to_decel)
+            cmd_2 = ""
+            if get_conf_en_spreadCycle:
+                cmd_2 = "SET_TMC_FIELD STEPPER=stepper_x FIELD=en_spreadCycle VALUE=%d\n" % (conf_en_spreadCycle)
+            if self.print_stats.get_status(eventtime)['print_duration'] > 0.0:
+                self.gcode.run_script_from_command(cmd_1 + "\n")
+            else:
+                self.gcode.run_script_from_command(
+                    cmd_1 + "\n" + cmd_2 + "\n")
     def cmd_M204(self, gcmd):
+        eventtime = self.reactor.monotonic()
+        #logging.info("\033[33m into cmd_M204\033[0m")
+        # logging.info(eventtime)
+        # logging.info(self.print_stats.get_status(eventtime)['print_duration'])
+        if self.print_stats.get_status(eventtime)['print_duration'] > 0.0:
+            #logging.info("\033[33m into diy cmd_M204\033[0m")
+            if self.print_mode == 0:
+                self.get_conf_max_accel_success = True
+                self.conf_max_accel = self.max_accel_normal
+            elif self.print_mode == 1:
+                self.get_conf_max_accel_success = True
+                self.conf_max_accel = self.max_accel_silent
+            elif self.print_mode == 2:
+                self.get_conf_max_accel_success = True
+                self.conf_max_accel = self.max_accel_berserk
+            else:
+                self.get_conf_max_accel_success = False
+        else:
+            self.get_conf_max_accel_success = False
         # Use S for accel
         accel = gcmd.get_float('S', None, above=0.)
         if accel is None:
@@ -592,8 +888,64 @@ class ToolHead:
                                   % (gcmd.get_commandline(),))
                 return
             accel = min(p, t)
+        if self.get_conf_max_accel_success:
+            if accel > self.conf_max_accel:
+                accel = self.conf_max_accel
         self.max_accel = accel
         self._calc_junction_deviation()
+    cmd_FAN_MODE_help = "Set fan mode"
+    def cmd_FAN_MODE(self, gcmd):
+        set_fan_mode = gcmd.get_int('SET', 0)
+        if self.fan_mode == set_fan_mode:
+            self.gcode.respond_info("Nothing to do: Fan mode is %d" % (set_fan_mode))
+        else:
+            self.fan_mode = set_fan_mode
+            self.gcode.respond_info("set fan_mode to %d" % (set_fan_mode))
+
+    def load_print_mode_conf(self):
+        config = configparser.ConfigParser()
+        conf_ini_path_l = [47, 104, 111, 109, 101, 47, 109, 107, 115, 47, 68, 101, 115, 107, 116, 111, 112, 47, 109, 121, 102, 105, 108, 101, 47, 122, 110, 112, 47, 122, 110, 112, 95, 116, 106, 99, 95, 107, 108, 105, 112, 112, 101, 114, 47, 101, 108, 101, 103, 111, 111, 95, 99, 111, 110, 102, 46, 105, 110, 105]
+        conf_ini_path = "".join(map(chr, conf_ini_path_l))
+        config.read(conf_ini_path)
+        
+        if config.has_section("speed_mode"):
+            if config.has_option("speed_mode", "print_mode"):
+                self.print_mode = config.getint("speed_mode", "print_mode")
+            else:
+                self.get_conf_max_velocity_success = False
+                self.get_conf_max_accel_success = False
+                self.get_conf_max_accel_to_decel_success = False
+        else:
+            self.get_conf_max_velocity_success = False
+            self.get_conf_max_accel_success = False
+            self.get_conf_max_accel_to_decel_success = False
+        logging.info("load print_mode 0 conf")
+        if config.has_option("speed_mode", "max_velocity_normal"):
+            self.max_velocity_normal = config.getfloat("speed_mode", "max_velocity_normal")
+        if config.has_option("speed_mode", "max_accel_normal"):
+            self.max_accel_normal = config.getfloat("speed_mode", "max_accel_normal")
+        if config.has_option("speed_mode", "max_accel_to_decel_normal"):
+            self.max_accel_to_decel_normal = config.getfloat("speed_mode", "max_accel_to_decel_normal")
+
+        logging.info("load print_mode 1 conf")
+        if config.has_option("speed_mode", "max_velocity_silent"):
+            self.max_velocity_silent = config.getfloat("speed_mode", "max_velocity_silent")
+        if config.has_option("speed_mode", "max_accel_silent"):
+            self.max_accel_silent = config.getfloat("speed_mode", "max_accel_silent")
+        if config.has_option("speed_mode", "max_accel_to_decel_silent"):
+            self.max_accel_to_decel_silent = config.getfloat("speed_mode", "max_accel_to_decel_silent")
+
+        logging.info("load print_mode 2 conf")
+        if config.has_option("speed_mode", "max_velocity_berserk"):
+            self.max_velocity_berserk = config.getfloat("speed_mode", "max_velocity_berserk")
+        if config.has_option("speed_mode", "max_accel_berserk"):
+            self.max_accel_berserk = config.getfloat("speed_mode", "max_accel_berserk")
+        if config.has_option("speed_mode", "max_accel_to_decel_berserk"):
+            self.max_accel_to_decel_berserk = config.getfloat("speed_mode", "max_accel_to_decel_berserk")
+        
+        self.get_conf_max_velocity_success = True
+        self.get_conf_max_accel_success = True
+        self.get_conf_max_accel_to_decel_success = True
 
 def add_printer_objects(config):
     config.get_printer().add_object('toolhead', ToolHead(config))
