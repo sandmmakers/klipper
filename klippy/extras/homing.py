@@ -277,6 +277,7 @@ class PrinterHoming:
         return epos
     def cmd_G28(self, gcmd):
         # Move to origin
+        self.printer.lookup_object('gcode')._respond_state("Start to moving home")
         axes = []
         for pos, axis in enumerate('XYZ'):
             if gcmd.get(axis, None) is not None:
@@ -292,6 +293,8 @@ class PrinterHoming:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(
                     "Homing failed due to printer shutdown")
+            else :
+                self.printer.lookup_object('gcode')._respond_state("Homing failed")
             self.printer.lookup_object('stepper_enable').motor_off()
             raise
 

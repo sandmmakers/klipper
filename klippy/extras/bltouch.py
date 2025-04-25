@@ -26,7 +26,8 @@ Commands = {
 class BLTouchProbe:
     def __init__(self, config):
         self.printer = config.get_printer()
-        self.position_endstop = config.getfloat('z_offset', minval=0.)
+        #self.position_endstop = config.getfloat('z_offset', minval=0.)
+        self.position_endstop = 0.
         self.stow_on_each_sample = config.getboolean('stow_on_each_sample',
                                                      True)
         self.probe_touch_mode = config.getboolean('probe_with_touch_mode',
