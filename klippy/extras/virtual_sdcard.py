@@ -4,6 +4,9 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import os, sys, logging, io
+if sys.version_info[0] == 2:
+    reload(sys)
+    sys.setdefaultencoding('utf-8')
 
 VALID_GCODE_EXTS = ['gcode', 'g', 'gco']
 
@@ -46,6 +49,9 @@ class VirtualSD:
         self.gcode.register_command(
             "SDCARD_PRINT_FILE", self.cmd_SDCARD_PRINT_FILE,
             desc=self.cmd_SDCARD_PRINT_FILE_help)
+        self.gcode.register_command(
+            "SDCARD_SELECT_FILE", self.cmd_SDCARD_SELECT_FILE,
+            desc=self.cmd_SDCARD_SELECT_FILE_help)
     def handle_shutdown(self):
         if self.work_timer is not None:
             self.must_pause_work = True
@@ -155,6 +161,17 @@ class VirtualSD:
             filename = filename[1:]
         self._load_file(gcmd, filename, check_subdirs=True)
         self.do_resume()
+    cmd_SDCARD_SELECT_FILE_help = "Select a SD file.  May "\
+        "include files in subdirectories."
+    def cmd_SDCARD_SELECT_FILE(self, gcmd):
+        if self.work_timer is not None:
+            raise gcmd.error("SD busy")
+        self._reset_file()
+        filename = gcmd.get("FILENAME")
+        if filename[0] == '/':
+            filename = filename[1:]
+        self._load_file(gcmd, filename, check_subdirs=True)
+
     def cmd_M20(self, gcmd):
         # List SD card
         files = self.get_file_list()
