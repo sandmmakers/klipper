@@ -176,7 +176,7 @@ class GCodeDispatch:
         if not self.is_printer_ready:
             return
         self.is_printer_ready = False
-        self.gcode_handlers = self.base_gcode_handlers
+        #self.gcode_handlers = self.base_gcode_handlers
         self._build_status_commands()
         self._respond_state("Shutdown")
     def _handle_disconnect(self):

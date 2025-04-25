@@ -25,8 +25,8 @@ class SaveVariables:
         varfile = configparser.ConfigParser()
         try:
             varfile.read(self.filename)
-            if varfile.has_section('Variables'):
-                for name, val in varfile.items('Variables'):
+            if varfile.has_section('variables'):
+                for name, val in varfile.items('variables'):
                     allvars[name] = ast.literal_eval(val)
         except:
             msg = "Unable to parse existing variable file"
@@ -47,9 +47,9 @@ class SaveVariables:
         newvars[varname] = value
         # Write file
         varfile = configparser.ConfigParser()
-        varfile.add_section('Variables')
+        varfile.add_section('variables')
         for name, val in sorted(newvars.items()):
-            varfile.set('Variables', name, repr(val))
+            varfile.set('variables', name, repr(val))
         try:
             f = open(self.filename, "w")
             varfile.write(f)
