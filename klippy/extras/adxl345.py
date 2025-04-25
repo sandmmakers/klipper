@@ -244,7 +244,7 @@ class ADXL345:
         self.lock = threading.Lock()
         self.raw_samples = []
         # Setup mcu sensor_adxl345 bulk query code
-        self.spi = bus.MCU_SPI_from_config(config, 3, default_speed=5000000)
+        self.spi = bus.MCU_SPI_from_config(config, 3, default_speed=2000000)
         self.mcu = mcu = self.spi.get_mcu()
         self.oid = oid = mcu.create_oid()
         self.query_adxl345_cmd = self.query_adxl345_end_cmd = None

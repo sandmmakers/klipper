@@ -416,4 +416,4 @@ class PrinterConfig:
             logging.exception(msg)
             raise gcode.error(msg)
         # Request a restart
-        gcode.request_restart('restart')
+        gcode.request_restart('firmware_restart')
